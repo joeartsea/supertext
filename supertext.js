@@ -33,6 +33,78 @@ function echoErr(message) {
     console.error(message);
 }
 
+// Function to extract URL patterns
+function extractPatterns(links) {
+    const patternSet = new Set();
+
+    links.forEach(link => {
+        const url = new URL(link);
+
+        // Extract path pattern
+        const pathParts = url.pathname.split('/');
+        const pathPattern = pathParts.map(part => (/\d+/.test(part) ? '{number}' : part)).join('/');
+
+        // Extract and sort query parameters
+        const queryParams = new URLSearchParams(url.search);
+        const sortedParams = Array.from(queryParams.keys()).sort().join('&');
+
+        // Combine hostname, path, and query pattern
+        const fullPattern = `${url.hostname}${pathPattern}${sortedParams ? '?' + sortedParams : ''}`;
+        patternSet.add(fullPattern);
+    });
+
+    return Array.from(patternSet).map(pattern => {
+        const regexPattern = pattern
+            .replace(/{number}/g, '\\d+')
+            .replace(/[.]/g, '\\.')
+            .replace(/\//g, '\\/')
+            .replace(/([?&])([^=]+)=/g, '$1$2=[^&]*');
+
+        return {
+            name: pattern.replace(/[^\w]+/g, '_').replace(/_{2,}/g, '_').replace(/^_|_$/g, ''),
+            regex: new RegExp(`https?://${regexPattern}$`)
+        };
+    });
+}
+
+// Function to prompt user for each pattern
+function promptUserForPattern(patterns, callback) {
+    const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+    });
+
+    const results = {};
+
+    function askNextPattern(index) {
+        if (index >= patterns.length) {
+            rl.close();
+            callback(results);
+            return;
+        }
+
+        const pattern = patterns[index];
+        rl.question(`Do you want to ignore URLs matching this pattern? ${pattern.name} (y/n): `, (answer) => {
+            results[pattern.name] = (answer.toLowerCase() === 'y');
+            askNextPattern(index + 1);
+        });
+    }
+
+    askNextPattern(0);
+}
+
+// Function to filter links based on user input
+function filterLinks(links, patterns, ignoreList) {
+    return links.filter(link => {
+        for (const pattern of patterns) {
+            if (pattern.regex.test(link[0]) && ignoreList[pattern.name]) {
+                return false; // Ignore this link
+            }
+        }
+        return true; // Keep this link
+    });
+}
+
 async function fetchAndParseLinks(url) {
     if (urlCache.has(url)) {
         return urlCache.get(url);
@@ -116,6 +188,17 @@ async function processLinks(urls, level, resume = false, savedSelections = []) {
     let allLinks = await fetchAllLinks(urls);
     allLinks.sort((a, b) => a[0].localeCompare(b[0])); // Sort links to make IDs consistent
 
+    // Extract patterns and prompt user
+    const patterns = extractPatterns(allLinks.map(link => link[0])); // Extract patterns from URL list
+    console.log('Extracted patterns:', patterns);
+
+    const ignoreList = await new Promise((resolve) => {
+        promptUserForPattern(patterns, resolve);
+    });
+
+    // Filter links based on user input
+    allLinks = filterLinks(allLinks, patterns, ignoreList);
+
     while (true) {
         echoErr('Remaining links:');
         displayLinks(allLinks);
@@ -152,7 +235,7 @@ async function processLinks(urls, level, resume = false, savedSelections = []) {
                 echoErr('Cannot apply more than once.');
                 continue;
             }
-            const selections = savedSelections[level - 1];
+            const selections = savedSelections[level - 1] || [];
             for (const selection of selections) {
                 allLinks = applySelection(selection, allLinks);
             }
